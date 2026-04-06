@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 
 	"github.com/spf13/cobra"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/jaydasondee/wbc/internal/store"
 	"github.com/jaydasondee/wbc/internal/transformer"
 	"github.com/jaydasondee/wbc/pkg/ethapi"
+	"github.com/jaydasondee/wbc/pkg/models"
 )
 
 var cfg *config.Config
@@ -38,7 +40,7 @@ func main() {
 }
 
 func ingestCmd() *cobra.Command {
-	var wallet, contract, chain string
+	var wallet, contract string
 	var fromBlk, toBlk uint64
 
 	cmd := &cobra.Command{
@@ -76,10 +78,26 @@ func ingestCmd() *cobra.Command {
 
 	cmd.Flags().StringVar(&wallet, "wallet", "", "wallet address to ingest")
 	cmd.Flags().StringVar(&contract, "contract", "", "contract address to ingest")
-	cmd.Flags().StringVar(&chain, "chain", "ethereum", "chain name")
+	cmd.Flags().String("chain", "ethereum", "chain name")
 	cmd.Flags().Uint64Var(&fromBlk, "from-block", 0, "start block")
 	cmd.Flags().Uint64Var(&toBlk, "to-block", 99999999, "end block")
 	return cmd
+}
+
+func mapMembers(clusters []models.Cluster, addrMap map[int]string) {
+	for i := range clusters {
+		mapped := make([]string, 0, len(clusters[i].Members))
+		for _, m := range clusters[i].Members {
+			idx, err := strconv.Atoi(m)
+			if err != nil {
+				continue
+			}
+			if addr, ok := addrMap[idx]; ok {
+				mapped = append(mapped, addr)
+			}
+		}
+		clusters[i].Members = mapped
+	}
 }
 
 func analyzeCmd() *cobra.Command {
@@ -104,13 +122,10 @@ func analyzeCmd() *cobra.Command {
 			}
 
 			tf := transformer.New()
-			walletTxs := make(map[string][]interface{})
-			_ = walletTxs
-
 			var vecs [][]float64
 			addrMap := make(map[int]string)
 
-			for i, addr := range addrs {
+			for _, addr := range addrs {
 				txs, err := st.GetTxsByWallet(ctx, addr)
 				if err != nil {
 					continue
@@ -119,33 +134,29 @@ func analyzeCmd() *cobra.Command {
 				if err != nil {
 					continue
 				}
+				addrMap[len(vecs)] = addr
 				vecs = append(vecs, f.Vec())
-				addrMap[i] = addr
 			}
 
-			var clusters []interface{}
+			var clusters []models.Cluster
 			switch algo {
 			case "kmeans":
 				km := classifier.NewKMeans(k, cfg.Analysis.MaxIter)
-				c, err := km.Fit(vecs)
+				clusters, err = km.Fit(vecs)
 				if err != nil {
 					return err
-				}
-				for _, cl := range c {
-					clusters = append(clusters, cl)
 				}
 			case "hdbscan":
 				hdb := classifier.NewHDBSCAN(minCluster, cfg.Analysis.HDBSCANMinPts)
-				c, err := hdb.Fit(vecs)
+				clusters, err = hdb.Fit(vecs)
 				if err != nil {
 					return err
-				}
-				for _, cl := range c {
-					clusters = append(clusters, cl)
 				}
 			default:
 				return fmt.Errorf("unknown algorithm: %s", algo)
 			}
+
+			mapMembers(clusters, addrMap)
 
 			enc := json.NewEncoder(os.Stdout)
 			enc.SetIndent("", "  ")
@@ -180,15 +191,9 @@ func profileCmd() *cobra.Command {
 			}
 
 			tf := transformer.New()
-			features := make(map[string]interface{})
-			_ = features
-
 			var vecs [][]float64
-			featMap := make(map[string]interface{})
-			_ = featMap
-
-			addrFeatures := make(map[string]interface{})
-			_ = addrFeatures
+			addrMap := make(map[int]string)
+			addrFeats := make(map[string]models.Feature)
 
 			for _, addr := range addrs {
 				txs, err := st.GetTxsByWallet(ctx, addr)
@@ -199,6 +204,8 @@ func profileCmd() *cobra.Command {
 				if err != nil {
 					continue
 				}
+				addrMap[len(vecs)] = addr
+				addrFeats[addr] = f
 				vecs = append(vecs, f.Vec())
 			}
 
@@ -208,25 +215,27 @@ func profileCmd() *cobra.Command {
 				return err
 			}
 
-			pf := profiler.New()
-			fMap := make(map[string]interface{})
-			_ = fMap
+			mapMembers(clusters, addrMap)
 
-			_ = pf
-			_ = clusters
+			pf := profiler.New()
+			profiles, err := pf.Label(clusters, addrFeats)
+			if err != nil {
+				return err
+			}
 
 			enc := json.NewEncoder(os.Stdout)
 			enc.SetIndent("", "  ")
 
 			switch format {
 			case "json":
-				return enc.Encode(clusters)
+				return enc.Encode(profiles)
 			case "table":
-				for _, c := range clusters {
-					fmt.Fprintf(os.Stdout, "Cluster %d | %s | %d members\n", c.ID, c.Label, len(c.Members))
+				fmt.Fprintf(os.Stdout, "%-42s | %-20s | %-10s | %s\n", "Address", "Label", "Confidence", "Cluster")
+				for _, p := range profiles {
+					fmt.Fprintf(os.Stdout, "%-42s | %-20s | %-10.4f | %d\n", p.Addr, p.Label, p.Confidence, p.ClusterID)
 				}
 			default:
-				return enc.Encode(clusters)
+				return enc.Encode(profiles)
 			}
 			return nil
 		},
