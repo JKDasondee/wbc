@@ -4,3 +4,4 @@ bin/
 .wbc/
 vendor/
 .env
+.aider*

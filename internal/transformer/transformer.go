@@ -9,9 +9,13 @@ import (
 	"github.com/jaydasondee/wbc/pkg/models"
 )
 
-type Transformer struct{}
+type Transformer struct {
+	whales map[string][]string
+}
 
-func New() *Transformer { return &Transformer{} }
+func New() *Transformer { return &Transformer{whales: make(map[string][]string)} }
+
+func (t *Transformer) SetWhaleData(d map[string][]string) { t.whales = d }
 
 func (t *Transformer) Extract(_ context.Context, _ string, txs []models.Tx) (models.Feature, error) {
 	if len(txs) == 0 {
@@ -27,6 +31,24 @@ func (t *Transformer) Extract(_ context.Context, _ string, txs []models.Tx) (mod
 	f.SeqPattern = sequencePattern(txs)
 	f.FirstInteractLag = firstInteractionLag(txs)
 	f.CopyScore = 0
+	var seq []string
+	for _, tx := range txs {
+		if tx.To != "" {
+			seq = append(seq, tx.To)
+		}
+	}
+	if len(seq) > 0 && len(t.whales) > 0 {
+		for _, ws := range t.whales {
+			d := len(seq)
+			if len(ws) > d {
+				d = len(ws)
+			}
+			r := float64(lcsLen(seq, ws)) / float64(d)
+			if r > f.CopyScore {
+				f.CopyScore = r
+			}
+		}
+	}
 	return f, nil
 }
 
@@ -145,4 +167,25 @@ func firstInteractionLag(txs []models.Tx) float64 {
 	}
 	sort.Slice(txs, func(i, j int) bool { return txs[i].Timestamp.Before(txs[j].Timestamp) })
 	return float64(txs[0].BlockNum)
+}
+
+func lcsLen(a, b []string) int {
+	n, m := len(a), len(b)
+	dp := make([][]int, n+1)
+	for i := range dp {
+		dp[i] = make([]int, m+1)
+	}
+	for i := 1; i <= n; i++ {
+		for j := 1; j <= m; j++ {
+			if a[i-1] == b[j-1] {
+				dp[i][j] = dp[i-1][j-1] + 1
+			} else {
+				dp[i][j] = dp[i-1][j]
+				if dp[i][j-1] > dp[i][j] {
+					dp[i][j] = dp[i][j-1]
+				}
+			}
+		}
+	}
+	return dp[n][m]
 }
