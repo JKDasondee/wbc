@@ -1,0 +1,6 @@
+bin/
+*.db
+*.exe
+.wbc/
+vendor/
+.env
