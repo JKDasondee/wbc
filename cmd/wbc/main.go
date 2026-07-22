@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"strconv"
 
 	"github.com/spf13/cobra"
 
@@ -40,7 +39,7 @@ func main() {
 }
 
 func ingestCmd() *cobra.Command {
-	var wallet, contract string
+	var wallet, contract, chain string
 	var fromBlk, toBlk uint64
 
 	cmd := &cobra.Command{
@@ -78,26 +77,10 @@ func ingestCmd() *cobra.Command {
 
 	cmd.Flags().StringVar(&wallet, "wallet", "", "wallet address to ingest")
 	cmd.Flags().StringVar(&contract, "contract", "", "contract address to ingest")
-	cmd.Flags().String("chain", "ethereum", "chain name")
+	cmd.Flags().StringVar(&chain, "chain", "ethereum", "chain name")
 	cmd.Flags().Uint64Var(&fromBlk, "from-block", 0, "start block")
 	cmd.Flags().Uint64Var(&toBlk, "to-block", 99999999, "end block")
 	return cmd
-}
-
-func mapMembers(clusters []models.Cluster, addrMap map[int]string) {
-	for i := range clusters {
-		mapped := make([]string, 0, len(clusters[i].Members))
-		for _, m := range clusters[i].Members {
-			idx, err := strconv.Atoi(m)
-			if err != nil {
-				continue
-			}
-			if addr, ok := addrMap[idx]; ok {
-				mapped = append(mapped, addr)
-			}
-		}
-		clusters[i].Members = mapped
-	}
 }
 
 func analyzeCmd() *cobra.Command {
@@ -122,10 +105,11 @@ func analyzeCmd() *cobra.Command {
 			}
 
 			tf := transformer.New()
+
 			var vecs [][]float64
 			addrMap := make(map[int]string)
 
-			for _, addr := range addrs {
+			for i, addr := range addrs {
 				txs, err := st.GetTxsByWallet(ctx, addr)
 				if err != nil {
 					continue
@@ -134,29 +118,41 @@ func analyzeCmd() *cobra.Command {
 				if err != nil {
 					continue
 				}
-				addrMap[len(vecs)] = addr
 				vecs = append(vecs, f.Vec())
+				addrMap[i] = addr
 			}
 
-			var clusters []models.Cluster
+			var clusters []interface{}
 			switch algo {
 			case "kmeans":
 				km := classifier.NewKMeans(k, cfg.Analysis.MaxIter)
-				clusters, err = km.Fit(vecs)
+				c, err := km.Fit(vecs)
 				if err != nil {
 					return err
 				}
+				for _, cl := range c {
+					cluster := cl.(classifier.Cluster)
+					for i := range cluster.Members {
+						cluster.Members[i] = addrMap[cluster.Members[i]]
+					}
+					clusters = append(clusters, cluster)
+				}
 			case "hdbscan":
 				hdb := classifier.NewHDBSCAN(minCluster, cfg.Analysis.HDBSCANMinPts)
-				clusters, err = hdb.Fit(vecs)
+				c, err := hdb.Fit(vecs)
 				if err != nil {
 					return err
+				}
+				for _, cl := range c {
+					cluster := cl.(classifier.Cluster)
+					for i := range cluster.Members {
+						cluster.Members[i] = addrMap[cluster.Members[i]]
+					}
+					clusters = append(clusters, cluster)
 				}
 			default:
 				return fmt.Errorf("unknown algorithm: %s", algo)
 			}
-
-			mapMembers(clusters, addrMap)
 
 			enc := json.NewEncoder(os.Stdout)
 			enc.SetIndent("", "  ")
@@ -191,9 +187,9 @@ func profileCmd() *cobra.Command {
 			}
 
 			tf := transformer.New()
+
 			var vecs [][]float64
-			addrMap := make(map[int]string)
-			addrFeats := make(map[string]models.Feature)
+			addrFeatureMap := make(map[string]models.Feature)
 
 			for _, addr := range addrs {
 				txs, err := st.GetTxsByWallet(ctx, addr)
@@ -204,9 +200,8 @@ func profileCmd() *cobra.Command {
 				if err != nil {
 					continue
 				}
-				addrMap[len(vecs)] = addr
-				addrFeats[addr] = f
 				vecs = append(vecs, f.Vec())
+				addrFeatureMap[addr] = f
 			}
 
 			km := classifier.NewKMeans(cfg.Analysis.DefaultK, cfg.Analysis.MaxIter)
@@ -215,10 +210,8 @@ func profileCmd() *cobra.Command {
 				return err
 			}
 
-			mapMembers(clusters, addrMap)
-
 			pf := profiler.New()
-			profiles, err := pf.Label(clusters, addrFeats)
+			profiles, err := pf.Label(clusters, addrFeatureMap)
 			if err != nil {
 				return err
 			}
@@ -230,9 +223,8 @@ func profileCmd() *cobra.Command {
 			case "json":
 				return enc.Encode(profiles)
 			case "table":
-				fmt.Fprintf(os.Stdout, "%-42s | %-20s | %-10s | %s\n", "Address", "Label", "Confidence", "Cluster")
 				for _, p := range profiles {
-					fmt.Fprintf(os.Stdout, "%-42s | %-20s | %-10.4f | %d\n", p.Addr, p.Label, p.Confidence, p.ClusterID)
+					fmt.Fprintf(os.Stdout, "Profile %s | %s | %d members\n", p.Addr, p.Label, len(p.Members))
 				}
 			default:
 				return enc.Encode(profiles)
