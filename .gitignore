@@ -21,3 +21,7 @@ __pycache__/
 *.pyc
 .turbo/
 *.tsbuildinfo
+nul
+**/.env
+**/.env.*
+!**/.env.example
